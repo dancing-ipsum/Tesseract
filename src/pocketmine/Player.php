@@ -352,6 +352,16 @@ class Player extends Human implements CommandSender, InventoryHolder, ChunkLoade
 		return $this->randomClientId;
 	}
 
+    public static function isValidUserName(string $name) : bool{
+        $lname = strtolower($name);
+        $len = strlen($name);
+        return $lname !== "rcon" and $lname !== "console" and $len >= 1 and $len <= 16 and preg_match("[^A-Za-z0-9_]", $name) === 0;
+    }
+
+    public static function isValidSkin(string $skin) : bool{
+        return strlen($skin) === 64 * 64 * 4 or strlen($skin) === 64 * 32 * 4;
+    }
+
 	public function getClientSecret(){
 		return $this->clientSecret;
 	}
@@ -1642,6 +1652,16 @@ class Player extends Human implements CommandSender, InventoryHolder, ChunkLoade
 		}
 	}
 
+	public function sendPlayStatus(int $status, bool $immediate = false){
+        $pk = new PlayStatusPacket();
+        $pk->status = $status;
+        if($immediate){
+            $this->directDataPacket($pk);
+        }else{
+            $this->dataPacket($pk);
+        }
+    }
+
 	public function onUpdate($currentTick){
 		if(!$this->loggedIn){
 			return false;
@@ -2024,6 +2044,11 @@ class Player extends Human implements CommandSender, InventoryHolder, ChunkLoade
 					break;
 				}
 
+                $this->sendPlayStatus(PlayStatusPacket::LOGIN_SUCCESS);
+
+                $infoPacket = new ResourcePacksInfoPacket();
+                $this->dataPacket($infoPacket);
+
 				$this->username = TextFormat::clean($packet->username);
 				$this->displayName = $this->username;
 				$this->setNameTag($this->username);
@@ -2046,15 +2071,11 @@ class Player extends Human implements CommandSender, InventoryHolder, ChunkLoade
 					if($packet->protocol < ProtocolInfo::CURRENT_PROTOCOL){
 						$message = "disconnectionScreen.outdatedClient";
 
-						$pk = new PlayStatusPacket();
-						$pk->status = PlayStatusPacket::LOGIN_FAILED_CLIENT;
-						$this->directDataPacket($pk);
+                        $this->sendPlayStatus(PlayStatusPacket::LOGIN_FAILED_CLIENT, true);
 					}else{
 						$message = "disconnectionScreen.outdatedServer";
 
-						$pk = new PlayStatusPacket();
-						$pk->status = PlayStatusPacket::LOGIN_FAILED_SERVER;
-						$this->directDataPacket($pk);
+                        $this->sendPlayStatus(PlayStatusPacket::LOGIN_FAILED_SERVER, true);
 					}
 					$this->close("", $message, false);
 
@@ -2066,28 +2087,13 @@ class Player extends Human implements CommandSender, InventoryHolder, ChunkLoade
 				$this->uuid = UUID::fromString($packet->clientUUID);
 				$this->rawUUID = $this->uuid->toBinary();
 
-				$valid = true;
-				$len = strlen($packet->username);
-				if($len > 16 or $len < 3){
-					$valid = false;
-				}
-				for($i = 0; $i < $len and $valid; ++$i){
-					$c = ord($packet->username{$i});
-					if(($c >= ord("a") and $c <= ord("z")) or ($c >= ord("A") and $c <= ord("Z")) or ($c >= ord("0") and $c <= ord("9")) or $c === ord("_")){
-						continue;
-					}
-
-					$valid = false;
-					break;
-				}
-
-				if(!$valid or $this->iusername === "rcon" or $this->iusername === "console"){
+				if(!Player::isValidUserName($packet->username)){
 					$this->close("", "disconnectionScreen.invalidName");
 
 					break;
 				}
 
-				if((strlen($packet->skin) != 64 * 64 * 4) and (strlen($packet->skin) != 64 * 32 * 4)){
+				if(!Player::isValidSkin($packet->skin)){
 					$this->close("", "disconnectionScreen.invalidSkin");
 
 					break;
@@ -2102,72 +2108,8 @@ class Player extends Human implements CommandSender, InventoryHolder, ChunkLoade
 					break;
 				}
 
-				$pk = new PlayStatusPacket();
-				$pk->status = PlayStatusPacket::LOGIN_SUCCESS;
-				$this->directDataPacket($pk);
-
-				$infoPacket = new ResourcePacksInfoPacket();
-        		$infoPacket->resourcePackEntries = $this->server->getResourcePackManager()->getResourceStack();
-        		$infoPacket->mustAccept = $this->server->forceResources;
-        		$this->directDataPacket($infoPacket);
-				
-				/*if($this->isConnected()){
-					$this->processLogin();
-				}*/
+                $this->processLogin();
 				break;
-
-            case ProtocolInfo::RESOURCE_PACK_CLIENT_RESPONSE_PACKET:
-               	switch($packet->status){
-		 			case ResourcePackClientResponsePacket::STATUS_REFUSED:
-		  				$this->close("", "must accept resource packs to join", true);
-		  				break;
-		  			case ResourcePackClientResponsePacket::STATUS_SEND_PACKS:
-		 				$manager = $this->server->getResourcePackManager();
-		 				foreach($packet->packIds as $uuid){
-		 					$pack = $manager->getPackById($uuid);
-		 					if(!($pack instanceof ResourcePack)){
-		 						//Client requested a resource pack but we don't have it available on the server
-		 						$this->close("", "disconnectionScreen.resourcePack", true); //TODO: add strings to lang files
-		 						break;
-		 					}
-		 
-		 					$pk = new ResourcePackDataInfoPacket();
-		 					$pk->packId = $pack->getPackId();
-		 					$pk->maxChunkSize = 1048576; //1MB
-		 					$pk->chunkCount = $pack->getPackSize() / $pk->maxChunkSize;
-		 					$pk->compressedPackSize = $pack->getPackSize();
-		 					$pk->sha256 = $pack->getSha256();
-		 					$this->dataPacket($pk);
-		 				}
-		 				break;
-		 			case ResourcePackClientResponsePacket::STATUS_HAVE_ALL_PACKS:
-		 				$pk = new ResourcePackStackPacket();
-		 				$manager = $this->server->getResourcePackManager();
-		 				$pk->resourcePackStack = $manager->getResourceStack();
-		 				$pk->mustAccept = $manager->resourcePacksRequired();
-		 				$this->dataPacket($pk);
-		  				break;
-		  			case ResourcePackClientResponsePacket::STATUS_COMPLETED:
-		  				$this->processLogin();
-		  				break;
-		  		}
-		  		break;
-
-		  	case ProtocolInfo::RESOURCE_PACK_CHUNK_REQUEST_PACKET:
-		  		$manager = $this->server->getResourcePackManager();
- 				$pack = $manager->getPackById($packet->packId);
- 				if(!($pack instanceof ResourcePack)){
- 					$this->close("", "disconnectionScreen.resourcePack", true);
- 					return true;
- 				}
- 
- 				$pk = new ResourcePackChunkDataPacket();
- 				$pk->packId = $pack->getPackId();
- 				$pk->chunkIndex = $packet->chunkIndex;
- 				$pk->data = $pack->getPackChunk(1048576 * $packet->chunkIndex, 1048576);
- 				$pk->progress = (1048576 * $packet->chunkIndex);
- 				$this->dataPacket($pk);
-                break;
 
 			case ProtocolInfo::MOVE_PLAYER_PACKET:
 				if($this->linkedEntity instanceof Entity){
